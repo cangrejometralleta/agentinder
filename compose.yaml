@@ -1,0 +1,11 @@
+services:
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "beta", "emulators", "firestore", "start", "--host-port=0.0.0.0:8080", "--project=agentinder-local"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent http://localhost:8080 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    ports:
+      - "127.0.0.1:8086:8080"

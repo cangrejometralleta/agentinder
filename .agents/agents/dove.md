@@ -1,0 +1,1 @@
+../canon/.agents/agents/dove.md

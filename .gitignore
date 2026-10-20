@@ -1,0 +1,10 @@
+.env
+**/.env
+config/deploy.env
+backend/data/*.json
+backend/bin/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.agents/canon
+backend/api
