@@ -1,0 +1,16 @@
+meta {
+  name: Get public dates through BFF
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{bffUrl}}/api/v1/public/dates
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  Origin: {{webOrigin}}
+}

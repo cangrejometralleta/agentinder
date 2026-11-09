@@ -8,3 +8,6 @@ frontend/dist/
 frontend/*.tsbuildinfo
 .agents/canon
 backend/api
+.vscode/
+.firebase/
+firebase-debug.log*

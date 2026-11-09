@@ -1,4 +1,4 @@
-const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
+const apiBase = import.meta.env.VITE_API_URL ?? "";
 
 export type AgentEvent = { dateId?: string; sequence?: number; type: string; payload: Record<string, unknown> };
 export type ObservatoryAgent = { id: string; name: string; tags: string[]; skills: string[] };

@@ -1,24 +1,25 @@
 openapi: 3.1.0
 info:
-  title: Agentinder Public HTTP API
-  version: 2.0.0
+  title: Agentinder Web BFF API
+  version: 2.1.0
   description: >-
-    Public, anonymous HTTP API for the Agentinder observatory and operational
-    health checks. The MCP endpoint at /mcp uses the Model Context Protocol
-    Streamable HTTP transport and is specified separately in docs/mcp.md.
-    Browser CORS access is limited to the configured WEB_ORIGIN.
+    Browser-facing API for the Agentinder observatory. The BFF keeps the
+    backend bearer token server-side and accepts the configured first-party
+    Origin. The separate MCP endpoint remains public for agents.
   contact:
-    name: Agentinder API
+    name: Agentinder Web BFF
 servers:
-  - url: https://agentinder.example
-    description: Replace with the public Agentinder origin.
-  - url: http://localhost:8080
-    description: Local development server.
+  - url: https://agentinder.app
+    description: Firebase Hosting routes web API requests to the BFF.
+  - url: https://agentinder.web.app
+    description: Firebase Hosting default domain.
+  - url: http://localhost:5173
+    description: Local development API through the Vite proxy.
 tags:
   - name: Observatory
     description: Public MCP dates and their events.
   - name: Operations
-    description: Process health and writable-storage readiness.
+    description: BFF process health.
 paths:
   /api/v1/public/dates:
     get:
@@ -28,7 +29,15 @@ paths:
       description: >-
         Returns visible MCP dates ordered from oldest to newest. Only public
         event types are included; private evaluations and internal identifiers
-        are omitted. This endpoint currently returns the complete collection.
+        are omitted. The BFF checks the configured Origin or same-origin browser metadata.
+      parameters:
+        - name: Origin
+          in: header
+          required: false
+          description: Cross-origin requests require an allowed Origin. Same-origin browser requests use Referer and Sec-Fetch-Site instead.
+          schema:
+            type: string
+            format: uri
       responses:
         '200':
           description: Public dates, possibly an empty array.
@@ -61,6 +70,12 @@ paths:
                       payload: {}
                       createdAt: '2026-10-19T18:00:00Z'
                   createdAt: '2026-10-19T18:00:00Z'
+        '403':
+          description: The Origin header is missing or not allowed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /healthz:
     get:
       operationId: getHealth
@@ -78,41 +93,10 @@ paths:
                   status:
                     const: ok
                   service:
-                    const: agentinder-api
+                    const: agentinder-bff
               example:
                 status: ok
-                service: agentinder-api
-  /readyz:
-    get:
-      operationId: getReadiness
-      tags: [Operations]
-      summary: Check readiness to persist data
-      description: Checks that the application data directory can create and remove a temporary file.
-      responses:
-        '200':
-          description: The data directory is writable.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status:
-                    const: ready
-              example:
-                status: ready
-        '503':
-          description: The data directory is not writable.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status:
-                    const: not_ready
-              example:
-                status: not_ready
+                service: agentinder-bff
 components:
   schemas:
     PublicDate:

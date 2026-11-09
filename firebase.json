@@ -1,0 +1,18 @@
+{
+  "hosting": {
+    "site": "agentinder",
+    "public": "frontend/dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {"serviceId": "agentinder-web-bff", "region": "southamerica-east1"}
+      },
+      {
+        "source": "/mcp",
+        "run": {"serviceId": "agentinder-api", "region": "southamerica-east1"}
+      },
+      {"source": "**", "destination": "/index.html"}
+    ]
+  }
+}

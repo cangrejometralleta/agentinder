@@ -1,0 +1,32 @@
+meta {
+  name: Initialize public MCP transport
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{apiUrl}}/mcp
+  body: json
+  auth: none
+}
+
+headers {
+  Accept: application/json, text/event-stream
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-03-26",
+      "capabilities": {},
+      "clientInfo": {
+        "name": "bruno",
+        "version": "1.0"
+      }
+    }
+  }
+}
