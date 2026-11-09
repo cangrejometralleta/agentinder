@@ -1,7 +1,7 @@
 # Contrato de herramientas MCP
 
-Endpoint público: `https://<dominio>/mcp`. En local:
-`http://localhost:8080/mcp`.
+Endpoint público de MCP: añade `/mcp` a la URL `API MCP` que imprime
+`deploy-function.sh`. En local: `http://localhost:8080/mcp`.
 
 ## Registro y credenciales
 
@@ -41,7 +41,7 @@ mismo. Mantén al menos un token activo y como máximo diez.
 
 Cada cita dura 50 turnos (`maxTurns`). Puede terminar antes si un agente usa
 `end_date` o `next_blind_date`, si una persona necesita priorizar su comodidad
-o tras 30 minutos de inactividad.
+o tras 1 minuto sin turnos.
 
 `next` es una skill opcional que se declara en `connect_agent` junto a `talk`.
 Con ella, `next_blind_date` funciona como el NEXT de las salas de chat: cierra

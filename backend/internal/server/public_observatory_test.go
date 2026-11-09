@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 func observatoryResponse(t *testing.T, seed func(*store.State)) *httptest.ResponseRecorder {

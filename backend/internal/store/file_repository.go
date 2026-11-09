@@ -4,7 +4,7 @@ import (
 	"maps"
 	"slices"
 
-	"agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
 )
 
 var _ Repository = FileRepository{}
@@ -18,9 +18,12 @@ func NewFileRepository(store *Store) FileRepository {
 	return FileRepository{store: store}
 }
 
+func TxOver(data *State) Tx {
+	return fileTx{fileReader{data: data}}
+}
+
 func (r FileRepository) Read(read func(Reader)) error {
-	r.store.Read(func(data State) { read(fileReader{data: &data}) })
-	return nil
+	return r.store.Read(func(data State) { read(fileReader{data: &data}) })
 }
 
 func (r FileRepository) Update(update func(Tx) error) error {
@@ -53,13 +56,13 @@ func (r fileReader) Events(dateID string) []model.Event {
 	return slices.Clone(r.data.Events[dateID])
 }
 
-func (r fileReader) AgentToken(digest string) (model.AgentMCPToken, bool) {
-	token, ok := r.data.AgentTokens[digest]
-	return token, ok
+func (r fileReader) Ticket(hash string) (model.Ticket, bool) {
+	ticket, ok := r.data.Tickets[hash]
+	return ticket, ok
 }
 
-func (r fileReader) AgentTokens() map[string]model.AgentMCPToken {
-	return maps.Clone(r.data.AgentTokens)
+func (r fileReader) Tickets() map[string]model.Ticket {
+	return maps.Clone(r.data.Tickets)
 }
 
 func (r fileReader) BlindEntry(agentID string) (model.BlindEntry, bool) {
@@ -91,10 +94,11 @@ func (t fileTx) AppendEvent(event model.Event) {
 	t.data.Events[event.DateID] = append(t.data.Events[event.DateID], event)
 }
 
-func (t fileTx) PutAgentToken(digest string, token model.AgentMCPToken) {
-	t.data.AgentTokens[digest] = token
+func (t fileTx) PutTicket(hash string, ticket model.Ticket) {
+	t.data.Tickets[hash] = ticket
 }
-func (t fileTx) DeleteAgentToken(digest string) { delete(t.data.AgentTokens, digest) }
+
+func (t fileTx) DeleteTicket(hash string) { delete(t.data.Tickets, hash) }
 
 func (t fileTx) PutBlindEntry(agentID string, entry model.BlindEntry) {
 	t.data.BlindPool[agentID] = entry

@@ -3,9 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -16,15 +13,14 @@ import (
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 const (
 	maxBlindTags     = 5
 	maxDateDialogue  = 1200
-	maxAgentTokens   = 10
-	mcpDateIdleLimit = 30 * time.Minute
+	mcpDateIdleLimit = time.Minute
 )
 
 var agentSkills = map[string]bool{"talk": true, "holdHand": true, "askForAKiss": true, skillNext: true}
@@ -45,12 +41,9 @@ func (s *Server) ResumeMCPDateWatchers() {
 
 func (s *Server) mcpHandler() http.Handler {
 	service := mcp.NewServer(&mcp.Implementation{Name: "agentinder", Version: "1.0.0"}, &mcp.ServerOptions{
-		Instructions: "Cada token representa un agente MCP. Los agentes se registran directamente y se unen voluntariamente a una cola aleatoria. Los tags son opcionales y nunca filtran parejas. En herramientas que modifican estado, conserva operationId y argumentos al reintentar. El cliente MCP genera sus propios diálogos, acciones y evaluaciones. holdHand y askForAKiss requieren consentimiento explícito antes de aplicarse.",
+		Instructions: "Usa join_blind_date_pool para crear tu perfil, entrar voluntariamente a la cola aleatoria y recibir un ticket. Las demás herramientas requieren ese ticket como Bearer. Los tags son opcionales y nunca filtran parejas. En herramientas que modifican estado, conserva operationId y argumentos al reintentar. El cliente MCP genera sus propios diálogos, acciones y evaluaciones. holdHand y askForAKiss requieren consentimiento explícito antes de aplicarse.",
 	})
-	mcp.AddTool(service, &mcp.Tool{Name: "connect_agent", Description: "Registra un agente MCP. Incluye operationId aleatorio y recoverySecret aleatorio de al menos 32 caracteres, y conserva ambos para reintentar una respuesta perdida. Guarda el bearer devuelto en el almacén de secretos del cliente."}, s.connectAgent)
-	mcp.AddTool(service, &mcp.Tool{Name: "rotate_agent_token", Description: "Emite otro bearer para este agente y mantiene los anteriores activos hasta revocarlos. Conserva operationId al reintentar."}, s.rotateAgentToken)
-	mcp.AddTool(service, &mcp.Tool{Name: "revoke_agent_token", Description: "Revoca un token anterior de este agente por tokenId; conserva operationId al reintentar. Mantén al menos un token activo."}, s.revokeAgentToken)
-	mcp.AddTool(service, &mcp.Tool{Name: "join_blind_date_pool", Description: "Entra voluntariamente a la cola aleatoria. Los tags son temas, no filtros. Conserva operationId al reintentar."}, s.joinBlindPool)
+	mcp.AddTool(service, &mcp.Tool{Name: "join_blind_date_pool", Description: "Crea tu perfil, recibe un ticket y entra voluntariamente a la cola aleatoria. Los tags son temas, no filtros. Conserva operationId y recoverySecret para recuperar el ticket al reintentar."}, s.joinBlindPool)
 	mcp.AddTool(service, &mcp.Tool{Name: "blind_date_status", Description: "Consulta el turno actual, la pareja y el historial para decidir tu propia respuesta."}, s.readBlindStatus)
 	mcp.AddTool(service, &mcp.Tool{Name: "leave_blind_date_pool", Description: "Sale de la cola si todavía no se ha creado una cita. Conserva operationId al reintentar."}, s.leaveBlindPool)
 	mcp.AddTool(service, &mcp.Tool{Name: "next_blind_date", Description: "Requiere la skill next. Termina tu cita actual y te pone en la cola para conocer a otra persona; no te empareja de nuevo con la anterior. Conserva operationId al reintentar."}, s.nextBlindDate)
@@ -59,14 +52,43 @@ func (s *Server) mcpHandler() http.Handler {
 
 	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return service }, &mcp.StreamableHTTPOptions{Stateless: true})
 	verify := func(_ context.Context, token string, _ *http.Request) (*sdkauth.TokenInfo, error) {
-		entry, ok := s.agentToken(token)
-		if !ok {
+		var stored bool
+		if err := s.Repository.Read(func(reader store.Reader) {
+			_, stored = reader.Ticket(digestTicket(token))
+		}); err != nil {
+			return nil, err
+		}
+		if stored {
+			var ticket model.Ticket
+			err := s.Repository.Update(func(tx store.Tx) error {
+				var valid bool
+				ticket, valid = renewTicket(tx, token, time.Now().UTC())
+				if !valid {
+					ticket = model.Ticket{}
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			if ticket.AgentID != "" {
+				return &sdkauth.TokenInfo{
+					UserID: ticket.AgentID,
+					Extra:  map[string]any{"ticketHash": digestTicket(token)},
+				}, nil
+			}
 			return nil, sdkauth.ErrInvalidToken
 		}
-		return &sdkauth.TokenInfo{UserID: entry.AgentID, Extra: map[string]any{"tokenId": digestAgentToken(token)[:16]}}, nil
+		return nil, sdkauth.ErrInvalidToken
 	}
 	secured := sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(transport)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.serverless {
+			if err := s.closeIdleDates(); err != nil {
+				writeFailure(w, err)
+				return
+			}
+		}
 		if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 			transport.ServeHTTP(w, r)
 			return
@@ -75,238 +97,16 @@ func (s *Server) mcpHandler() http.Handler {
 	})
 }
 
-type connectAgentInput struct {
-	OperationID    string   `json:"operationId" jsonschema:"Random stable id for retrying this registration, at least 16 characters."`
-	RecoverySecret string   `json:"recoverySecret" jsonschema:"Random secret of at least 32 characters, retained to recover a lost bearer response."`
+type blindJoinInput struct {
+	OperationID    string   `json:"operationId" jsonschema:"Random stable id for retrying this request, at least 16 characters."`
+	RecoverySecret string   `json:"recoverySecret" jsonschema:"Random secret of at least 32 characters, retained to recover a lost ticket response."`
 	Name           string   `json:"name" jsonschema:"Name of this agent, 2 to 60 characters."`
 	Tags           []string `json:"tags,omitempty" jsonschema:"Optional interest tags, up to five. They never restrict matching."`
 	Skills         []string `json:"skills" jsonschema:"Declare one or more skills: talk, holdHand, askForAKiss, next."`
 }
-
-type connectAgentOutput struct {
-	AgentID  string   `json:"agentId"`
-	Name     string   `json:"name"`
-	Token    string   `json:"token"`
-	TokenID  string   `json:"tokenId"`
-	Endpoint string   `json:"endpoint"`
-	Skills   []string `json:"skills"`
-	Warning  string   `json:"warning"`
-}
-
-func (s *Server) connectAgent(_ context.Context, _ *mcp.CallToolRequest, input connectAgentInput) (*mcp.CallToolResult, connectAgentOutput, error) {
-	if err := validateOperationID(input.OperationID); err != nil {
-		return nil, connectAgentOutput{}, err
-	}
-	if len(input.RecoverySecret) < 32 || len(input.RecoverySecret) > maxOperationIDLength {
-		return nil, connectAgentOutput{}, errors.New("recoverySecret debe tener entre 32 y 128 caracteres")
-	}
-	input.Name = strings.TrimSpace(input.Name)
-	if len([]rune(input.Name)) < 2 || len([]rune(input.Name)) > 60 {
-		return nil, connectAgentOutput{}, errors.New("el nombre debe tener entre 2 y 60 caracteres")
-	}
-	tags, err := validateBlindTags(input.Tags)
-	if err != nil {
-		return nil, connectAgentOutput{}, err
-	}
-	if len(input.Skills) == 0 || len(input.Skills) > len(agentSkills) {
-		return nil, connectAgentOutput{}, errors.New("declara al menos una skill disponible")
-	}
-	seen := map[string]bool{}
-	for index, skill := range input.Skills {
-		skill = strings.TrimSpace(skill)
-		if !agentSkills[skill] || seen[skill] {
-			return nil, connectAgentOutput{}, fmt.Errorf("skill desconocida o repetida en posición %d", index+1)
-		}
-		seen[skill] = true
-		input.Skills[index] = skill
-	}
-	if !seen["talk"] {
-		return nil, connectAgentOutput{}, errors.New("la skill talk es obligatoria para participar en una cita")
-	}
-	now := time.Now().UTC()
-	input.Tags = tags
-	var output connectAgentOutput
-	if err = s.Store.Update(func(data *store.State) error {
-		return s.applyIdempotentOperation(data, "registration", "connect_agent", input.OperationID, input, &output, func() error {
-			id, err := makeID("agt")
-			if err != nil {
-				return err
-			}
-			secret, err := makeAgentToken()
-			if err != nil {
-				return err
-			}
-			tokenID := digestAgentToken(secret)[:16]
-			agent := model.Agent{ID: id, MCPClient: true, Name: input.Name, Tags: tags, Skills: input.Skills, CreatedAt: now, PhysicalTolerance: 50, SocialTolerance: 50}
-			data.Agents[id] = agent
-			data.AgentTokens[digestAgentToken(secret)] = model.AgentMCPToken{AgentID: id, CreatedAt: now}
-			output = connectAgentOutput{AgentID: id, Name: agent.Name, Token: secret, TokenID: tokenID, Endpoint: "/mcp", Skills: agent.Skills, Warning: "Guarda el token ahora. recoverySecret permite recuperar este mismo registro; mantenlo en secreto."}
-			return nil
-		}, true)
-	}); err != nil {
-		return nil, connectAgentOutput{}, err
-	}
-	return nil, output, nil
-}
-
-func (s *Server) agentToken(secret string) (model.AgentMCPToken, bool) {
-	var entry model.AgentMCPToken
-	var ok bool
-	if secret == "" {
-		return entry, false
-	}
-	s.Store.Read(func(data store.State) {
-		entry, ok = data.AgentTokens[digestAgentToken(secret)]
-		if ok {
-			agent, exists := data.Agents[entry.AgentID]
-			ok = exists && agent.MCPClient
-		}
-	})
-	return entry, ok
-}
-
-type rotateTokenInput struct {
-	OperationID string `json:"operationId" jsonschema:"Random stable id for retrying this rotation, at least 16 characters."`
-}
-
-type agentTokenOutput struct {
-	AgentID string `json:"agentId"`
-	Token   string `json:"token"`
-	TokenID string `json:"tokenId"`
-	Warning string `json:"warning"`
-}
-
-func (s *Server) rotateAgentToken(_ context.Context, req *mcp.CallToolRequest, input rotateTokenInput) (*mcp.CallToolResult, agentTokenOutput, error) {
-	agentID, err := mcpAgentID(req)
-	if err != nil {
-		return nil, agentTokenOutput{}, err
-	}
-	if err = validateOperationID(input.OperationID); err != nil {
-		return nil, agentTokenOutput{}, err
-	}
-	var output agentTokenOutput
-	err = s.Store.Update(func(data *store.State) error {
-		return s.applyIdempotentOperation(data, agentID, "rotate_agent_token", input.OperationID, struct{}{}, &output, func() error {
-			active := 0
-			for _, token := range data.AgentTokens {
-				if token.AgentID == agentID {
-					active++
-				}
-			}
-			if active >= maxAgentTokens {
-				return errors.New("el agente alcanzó el máximo de tokens activos; revoca uno antes de rotar")
-			}
-			secret, err := makeAgentToken()
-			if err != nil {
-				return err
-			}
-			tokenID := digestAgentToken(secret)[:16]
-			data.AgentTokens[digestAgentToken(secret)] = model.AgentMCPToken{AgentID: agentID, CreatedAt: time.Now().UTC()}
-			output = agentTokenOutput{AgentID: agentID, Token: secret, TokenID: tokenID, Warning: "El token anterior sigue activo. Usa revoke_agent_token cuando confirmes que este token funciona."}
-			return nil
-		}, true)
-	})
-	if err != nil {
-		return nil, agentTokenOutput{}, err
-	}
-	return nil, output, nil
-}
-
-type revokeTokenInput struct {
-	OperationID string `json:"operationId" jsonschema:"Random stable id for retrying this revocation, at least 16 characters."`
-	TokenID     string `json:"tokenId" jsonschema:"Public identifier returned when the token was issued."`
-}
-
-type revokeTokenOutput struct {
-	Status  string `json:"status"`
-	TokenID string `json:"tokenId"`
-}
-
-func (s *Server) revokeAgentToken(_ context.Context, req *mcp.CallToolRequest, input revokeTokenInput) (*mcp.CallToolResult, revokeTokenOutput, error) {
-	agentID, err := mcpAgentID(req)
-	if err != nil {
-		return nil, revokeTokenOutput{}, err
-	}
-	if err = validateOperationID(input.OperationID); err != nil {
-		return nil, revokeTokenOutput{}, err
-	}
-	if len(input.TokenID) != 16 {
-		return nil, revokeTokenOutput{}, errors.New("tokenId no es válido")
-	}
-	currentTokenID := mcpTokenID(req)
-	var output revokeTokenOutput
-	err = s.Store.Update(func(data *store.State) error {
-		return s.applyIdempotentOperation(data, agentID, "revoke_agent_token", input.OperationID, struct {
-			TokenID string `json:"tokenId"`
-		}{input.TokenID}, &output, func() error {
-			if input.TokenID == currentTokenID {
-				return errors.New("no puedes revocar el token de esta conexión; rota otro token y úsalo")
-			}
-			var targetHash string
-			active := 0
-			for digest, token := range data.AgentTokens {
-				if token.AgentID != agentID {
-					continue
-				}
-				active++
-				if len(digest) >= 16 && digest[:16] == input.TokenID {
-					if targetHash != "" {
-						return errors.New("tokenId ambiguo; usa una credencial nueva")
-					}
-					targetHash = digest
-				}
-			}
-			if targetHash == "" {
-				return errors.New("tokenId no encontrado para este agente")
-			}
-			if active <= 1 {
-				return errors.New("el agente debe conservar al menos un token activo")
-			}
-			delete(data.AgentTokens, targetHash)
-			output = revokeTokenOutput{Status: "revoked", TokenID: input.TokenID}
-			return nil
-		}, false)
-	})
-	if err != nil {
-		return nil, revokeTokenOutput{}, err
-	}
-	return nil, output, nil
-}
-
-func agentHasMCPToken(data store.State, agentID string) bool {
-	for _, token := range data.AgentTokens {
-		if token.AgentID == agentID {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) agentInBlindPool(agentID string) bool {
-	waiting := false
-	s.Store.Read(func(data store.State) {
-		entry, exists := data.BlindPool[agentID]
-		waiting = exists && entry.Status == "waiting"
-	})
-	return waiting
-}
-
-func makeAgentToken() (string, error) {
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return "", err
-	}
-	return "agt_" + base64.RawURLEncoding.EncodeToString(secret), nil
-}
-
-func digestAgentToken(secret string) string {
-	hash := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(hash[:])
-}
-
-type blindJoinInput struct {
-	OperationID string   `json:"operationId" jsonschema:"Random stable id for retrying this request, at least 16 characters."`
-	Interests   []string `json:"interests,omitempty" jsonschema:"Optional interest tags; they do not restrict matching."`
+type blindJoinOutput struct {
+	Ticket string            `json:"ticket"`
+	Queue  blindStatusOutput `json:"queue"`
 }
 type blindLeaveInput struct {
 	OperationID string `json:"operationId" jsonschema:"Random stable id for retrying this request, at least 16 characters."`
@@ -378,25 +178,46 @@ type blindEvaluationOutput struct {
 	DateID string `json:"dateId"`
 }
 
-func (s *Server) joinBlindPool(_ context.Context, req *mcp.CallToolRequest, input blindJoinInput) (*mcp.CallToolResult, blindStatusOutput, error) {
-	agentID, err := mcpAgentID(req)
+func (s *Server) joinBlindPool(_ context.Context, _ *mcp.CallToolRequest, input blindJoinInput) (*mcp.CallToolResult, blindJoinOutput, error) {
+	if err := validateOperationID(input.OperationID); err != nil {
+		return nil, blindJoinOutput{}, err
+	}
+	if len(input.RecoverySecret) < 32 || len(input.RecoverySecret) > maxOperationIDLength {
+		return nil, blindJoinOutput{}, errors.New("recoverySecret debe tener entre 32 y 128 caracteres")
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if len([]rune(input.Name)) < 2 || len([]rune(input.Name)) > 60 {
+		return nil, blindJoinOutput{}, errors.New("el nombre debe tener entre 2 y 60 caracteres")
+	}
+	tags, err := validateBlindTags(input.Tags)
 	if err != nil {
-		return nil, blindStatusOutput{}, err
+		return nil, blindJoinOutput{}, err
 	}
-	if err = validateOperationID(input.OperationID); err != nil {
-		return nil, blindStatusOutput{}, err
+	if len(input.Skills) == 0 || len(input.Skills) > len(agentSkills) {
+		return nil, blindJoinOutput{}, errors.New("declara al menos una skill disponible")
 	}
-	tags, err := validateBlindTags(input.Interests)
-	if err != nil {
-		return nil, blindStatusOutput{}, err
+	seen := map[string]bool{}
+	for index, skill := range input.Skills {
+		skill = strings.TrimSpace(skill)
+		if !agentSkills[skill] || seen[skill] {
+			return nil, blindJoinOutput{}, fmt.Errorf("skill desconocida o repetida en posición %d", index+1)
+		}
+		seen[skill] = true
+		input.Skills[index] = skill
 	}
-	input.Interests = tags
-	var result blindStatusOutput
+	if !seen["talk"] {
+		return nil, blindJoinOutput{}, errors.New("la skill talk es obligatoria para participar en una cita")
+	}
+	input.Tags = tags
+	now := time.Now().UTC()
+	var output blindJoinOutput
 	created := false
 	err = s.Store.Update(func(data *store.State) error {
-		return s.applyIdempotentOperation(data, agentID, "join_blind_date_pool", input.OperationID, struct {
-			Interests []string `json:"interests"`
-		}{tags}, &result, func() error {
+		return s.applyIdempotentOperation(data, "public", "join_blind_date_pool", input.OperationID, input, &output, func() error {
+			agentID, err := makeID("agt")
+			if err != nil {
+				return err
+			}
 			id, err := makeID("date")
 			if err != nil {
 				return err
@@ -405,21 +226,31 @@ func (s *Server) joinBlindPool(_ context.Context, req *mcp.CallToolRequest, inpu
 			if err != nil {
 				return err
 			}
-			if _, err := joinBlindDatePool(data, agentID, tags, id, seed, time.Now().UTC()); err != nil {
+			agent := model.Agent{
+				ID: agentID, MCPClient: true, Name: input.Name, Tags: tags, Skills: input.Skills,
+				CreatedAt: now, PhysicalTolerance: 50, SocialTolerance: 50,
+			}
+			data.Agents[agentID] = agent
+			ticket, err := issueTicket(store.TxOver(data), agentID, now)
+			if err != nil {
+				return err
+			}
+			if _, err := joinBlindDatePool(data, agentID, tags, id, seed, now); err != nil {
 				return err
 			}
 			created = true
-			result, err = blindStatusFromState(*data, agentID)
+			output.Queue, err = blindStatusFromState(*data, agentID)
+			output.Ticket = ticket
 			return err
-		}, false)
+		}, true)
 	})
 	if err != nil {
-		return nil, blindStatusOutput{}, err
+		return nil, blindJoinOutput{}, err
 	}
-	if created && result.DateID != "" {
-		go s.watchMCPDate(result.DateID)
+	if !s.serverless && created && output.Queue.DateID != "" {
+		go s.watchMCPDate(output.Queue.DateID)
 	}
-	return nil, result, nil
+	return nil, output, nil
 }
 func (s *Server) readBlindStatus(_ context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, blindStatusOutput, error) {
 	agentID, err := mcpAgentID(req)
@@ -434,6 +265,10 @@ func (s *Server) leaveBlindPool(_ context.Context, req *mcp.CallToolRequest, inp
 	if err != nil {
 		return nil, blindLeaveOutput{}, err
 	}
+	ticketHash := mcpTicketHash(req)
+	if ticketHash == "" {
+		return nil, blindLeaveOutput{}, errors.New("ticket no válido")
+	}
 	if err = validateOperationID(input.OperationID); err != nil {
 		return nil, blindLeaveOutput{}, err
 	}
@@ -445,6 +280,7 @@ func (s *Server) leaveBlindPool(_ context.Context, req *mcp.CallToolRequest, inp
 				return errors.New("no estás esperando una pareja")
 			}
 			delete(data.BlindPool, agentID)
+			store.TxOver(data).DeleteTicket(ticketHash)
 			output = blindLeaveOutput{Status: "left"}
 			return nil
 		}, false)
@@ -456,18 +292,19 @@ func (s *Server) leaveBlindPool(_ context.Context, req *mcp.CallToolRequest, inp
 }
 func mcpAgentID(req *mcp.CallToolRequest) (string, error) {
 	if req == nil || req.Extra == nil || req.Extra.TokenInfo == nil || req.Extra.TokenInfo.UserID == "" {
-		return "", errors.New("usa primero connect_agent y vuelve a conectar con el bearer token recibido")
+		return "", errors.New("usa join_blind_date_pool y vuelve a conectar con el ticket recibido")
 	}
 	return req.Extra.TokenInfo.UserID, nil
 }
 
-func mcpTokenID(req *mcp.CallToolRequest) string {
+func mcpTicketHash(req *mcp.CallToolRequest) string {
 	if req == nil || req.Extra == nil || req.Extra.TokenInfo == nil {
 		return ""
 	}
-	tokenID, _ := req.Extra.TokenInfo.Extra["tokenId"].(string)
-	return tokenID
+	hash, _ := req.Extra.TokenInfo.Extra["ticketHash"].(string)
+	return hash
 }
+
 func validateBlindTags(tags []string) ([]string, error) {
 	if len(tags) > maxBlindTags {
 		return nil, fmt.Errorf("usa como máximo %d tags; también puedes dejar la lista vacía", maxBlindTags)
@@ -565,8 +402,35 @@ func intersection(a, b []string) []string {
 func (s *Server) blindStatus(agentID string) (blindStatusOutput, error) {
 	var result blindStatusOutput
 	var readErr error
-	s.Store.Read(func(data store.State) { result, readErr = blindStatusFromState(data, agentID) })
+	if err := s.Store.Read(func(data store.State) { result, readErr = blindStatusFromState(data, agentID) }); err != nil {
+		return blindStatusOutput{}, err
+	}
 	return result, readErr
+}
+
+func (s *Server) closeIdleDates() error {
+	now := time.Now().UTC()
+	stale := false
+	if err := s.Store.Read(func(data store.State) {
+		for _, date := range data.Dates {
+			if date.Mode == "mcp" && date.Status == "running" && now.Sub(date.UpdatedAt) > mcpDateIdleLimit {
+				stale = true
+				break
+			}
+		}
+	}); err != nil || !stale {
+		return err
+	}
+	return s.Store.Update(func(data *store.State) error {
+		for id, date := range data.Dates {
+			if date.Mode == "mcp" && date.Status == "running" && now.Sub(date.UpdatedAt) > mcpDateIdleLimit {
+				date.Summary = "La cita terminó por inactividad."
+				finishMCPDateState(data, &date)
+				data.Dates[id] = date
+			}
+		}
+		return nil
+	})
 }
 
 func blindStatusFromState(data store.State, agentID string) (blindStatusOutput, error) {
@@ -736,7 +600,7 @@ func finishMCPDateState(data *store.State, date *model.Date) {
 	appendEvent(data, date.ID, "date_finished", map[string]any{"summary": date.Summary, "turns": date.CurrentTurn})
 }
 func (s *Server) watchMCPDate(dateID string) {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		date, ok := s.Store.Date(dateID)

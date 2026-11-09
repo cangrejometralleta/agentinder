@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -92,7 +92,7 @@ func (s *Server) nextBlindDate(_ context.Context, req *mcp.CallToolRequest, inpu
 	if err != nil {
 		return nil, blindStatusOutput{}, err
 	}
-	if created && result.DateID != "" && result.Status == "matched" {
+	if !s.serverless && created && result.DateID != "" && result.Status == "matched" {
 		go s.watchMCPDate(result.DateID)
 	}
 	return nil, result, nil

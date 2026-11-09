@@ -34,10 +34,11 @@ type Session struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-type AgentMCPToken struct {
-	AgentID   string    `json:"agentId"`
-	OwnerID   string    `json:"ownerId"`
-	CreatedAt time.Time `json:"createdAt"`
+type Ticket struct {
+	AgentID        string    `json:"agentId"`
+	CreatedAt      time.Time `json:"createdAt"`
+	LastActivityAt time.Time `json:"lastActivityAt"`
+	ExpiresAt      time.Time `json:"expiresAt"`
 }
 
 type BlindEntry struct {

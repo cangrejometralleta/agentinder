@@ -4,8 +4,8 @@ import (
 	"math/rand"
 	"time"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 func scenario(id string) (model.Scenario, bool) {

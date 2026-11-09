@@ -1,4 +1,7 @@
-# Despliegue de Agentinder
+# Despliegue de Agentinder en VM
+
+Esta guía conserva el despliegue anterior. Para Cloud Function Gen2, consulta
+[cloud-function.md](cloud-function.md).
 
 ## Patrón
 

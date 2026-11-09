@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"agentinder/backend/internal/keyring"
-	"agentinder/backend/internal/server"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/keyring"
+	"github.com/cangrejometralleta/agentinder/backend/internal/server"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 func main() {
@@ -29,6 +29,7 @@ func main() {
 		log.Fatal("cannot open application data")
 	}
 	api := server.New(data, config.WebOrigin, config.Tokens)
+	api.UseWebAPIToken(config.WebAPIToken)
 	api.ResumeMCPDateWatchers()
 	service := &http.Server{Addr: config.Address, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("Agentinder API listening on %s (%s)", config.Address, config.Environment)
@@ -42,6 +43,7 @@ type config struct {
 	Address     string
 	DataPath    string
 	WebOrigin   string
+	WebAPIToken string
 	Tokens      *keyring.Keyring
 }
 
@@ -49,6 +51,7 @@ func readConfig() (config, error) {
 	c := config{
 		Environment: strings.TrimSpace(os.Getenv("APP_ENV")),
 		Address:     os.Getenv("SERVER_ADDR"), DataPath: os.Getenv("DATA_PATH"), WebOrigin: os.Getenv("WEB_ORIGIN"),
+		WebAPIToken: strings.TrimSpace(os.Getenv("AGENTINDER_WEB_API_TOKEN")),
 	}
 	tokens, developmentKey, err := readKeyring()
 	if err != nil {
@@ -72,6 +75,9 @@ func readConfig() (config, error) {
 	}
 	if c.Environment == "production" && !strings.HasPrefix(c.WebOrigin, "https://") {
 		return c, errors.New("production requires HTTPS WEB_ORIGIN")
+	}
+	if c.Environment == "production" && c.WebAPIToken == "" {
+		return c, errors.New("production requires AGENTINDER_WEB_API_TOKEN")
 	}
 	return c, nil
 }

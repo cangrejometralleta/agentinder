@@ -8,22 +8,22 @@ import (
 	"sync"
 	"time"
 
-	"agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
 )
 
 type State struct {
-	Users       map[string]model.User          `json:"users"`
-	EmailIndex  map[string]string              `json:"emailIndex"`
-	Sessions    map[string]model.Session       `json:"sessions"`
-	AgentTokens map[string]model.AgentMCPToken `json:"agentMcpTokens"`
-	Operations  map[string]OperationReceipt    `json:"operationReceipts"`
-	Agents      map[string]model.Agent         `json:"agents"`
-	Invitations map[string]model.Invitation    `json:"invitations"`
-	Dates       map[string]model.Date          `json:"dates"`
-	Events      map[string][]model.Event       `json:"events"`
-	Memories    map[string]model.Memory        `json:"memories"`
-	BlindPool   map[string]model.BlindEntry    `json:"blindPool"`
-	Usage       []model.Usage                  `json:"usage"`
+	Users       map[string]model.User       `json:"users"`
+	EmailIndex  map[string]string           `json:"emailIndex"`
+	Sessions    map[string]model.Session    `json:"sessions"`
+	Tickets     map[string]model.Ticket     `json:"tickets"`
+	Operations  map[string]OperationReceipt `json:"operationReceipts"`
+	Agents      map[string]model.Agent      `json:"agents"`
+	Invitations map[string]model.Invitation `json:"invitations"`
+	Dates       map[string]model.Date       `json:"dates"`
+	Events      map[string][]model.Event    `json:"events"`
+	Memories    map[string]model.Memory     `json:"memories"`
+	BlindPool   map[string]model.BlindEntry `json:"blindPool"`
+	Usage       []model.Usage               `json:"usage"`
 }
 
 type OperationReceipt struct {
@@ -34,9 +34,10 @@ type OperationReceipt struct {
 }
 
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	data State
+	mu    sync.RWMutex
+	path  string
+	data  State
+	cloud *cloudStore
 }
 
 func Open(path string) (*Store, error) {
@@ -55,7 +56,8 @@ func Open(path string) (*Store, error) {
 func emptyState() State {
 	return State{
 		Users: map[string]model.User{}, EmailIndex: map[string]string{}, Sessions: map[string]model.Session{},
-		AgentTokens: map[string]model.AgentMCPToken{}, Operations: map[string]OperationReceipt{}, BlindPool: map[string]model.BlindEntry{},
+		Tickets:    map[string]model.Ticket{},
+		Operations: map[string]OperationReceipt{}, BlindPool: map[string]model.BlindEntry{},
 		Agents: map[string]model.Agent{}, Invitations: map[string]model.Invitation{}, Dates: map[string]model.Date{},
 		Events: map[string][]model.Event{}, Memories: map[string]model.Memory{}, Usage: []model.Usage{},
 	}
@@ -71,8 +73,8 @@ func normalizeState(data State) State {
 	if data.Sessions == nil {
 		data.Sessions = map[string]model.Session{}
 	}
-	if data.AgentTokens == nil {
-		data.AgentTokens = map[string]model.AgentMCPToken{}
+	if data.Tickets == nil {
+		data.Tickets = map[string]model.Ticket{}
 	}
 	if data.Operations == nil {
 		data.Operations = map[string]OperationReceipt{}
@@ -98,13 +100,20 @@ func normalizeState(data State) State {
 	return data
 }
 
-func (s *Store) Read(read func(State)) {
+func (s *Store) Read(read func(State)) error {
+	if s.cloud != nil {
+		return s.cloud.read(read)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	read(s.data)
+	return nil
 }
 
 func (s *Store) Update(update func(*State) error) error {
+	if s.cloud != nil {
+		return s.cloud.update(update)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	encoded, err := json.Marshal(s.data)
@@ -153,6 +162,9 @@ func (s *Store) Date(id string) (model.Date, bool) {
 }
 
 func (s *Store) CheckWritable() error {
+	if s.cloud != nil {
+		return s.cloud.update(func(*State) error { return nil })
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	directory := filepath.Dir(s.path)

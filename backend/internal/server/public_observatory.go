@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 type observatoryParticipant struct {
@@ -41,6 +41,12 @@ func publicMCPDateVisible(date model.Date) bool {
 }
 
 func (s *Server) publicObservatoryDates(w http.ResponseWriter, _ *http.Request) {
+	if s.serverless {
+		if err := s.closeIdleDates(); err != nil {
+			writeFailure(w, err)
+			return
+		}
+	}
 	dates := []observatoryDate{}
 	err := s.Repository.Read(func(data store.Reader) {
 		for _, date := range data.Dates() {

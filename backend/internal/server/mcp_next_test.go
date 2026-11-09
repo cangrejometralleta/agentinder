@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"agentinder/backend/internal/model"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/model"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 func withState(t *testing.T, seed func(*store.State), run func(*store.State)) {

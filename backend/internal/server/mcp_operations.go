@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 const (

@@ -2,35 +2,58 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
-	"agentinder/backend/internal/keyring"
-	"agentinder/backend/internal/store"
+	"github.com/cangrejometralleta/agentinder/backend/internal/keyring"
+	"github.com/cangrejometralleta/agentinder/backend/internal/store"
 )
 
 const bodyLimit = 1 << 20
 
 type Server struct {
-	Store      *store.Store
-	Repository store.Repository
-	WebOrigin  string
-	tokens     *keyring.Keyring
+	Store       *store.Store
+	Repository  store.Repository
+	WebOrigin   string
+	tokens      *keyring.Keyring
+	serverless  bool
+	webAPIToken string
 }
 
 func New(data *store.Store, webOrigin string, tokens *keyring.Keyring) *Server {
 	return &Server{Store: data, Repository: store.NewFileRepository(data), WebOrigin: webOrigin, tokens: tokens}
 }
 
+func (s *Server) UseServerless() { s.serverless = true }
+
+func (s *Server) UseWebAPIToken(token string) { s.webAPIToken = token }
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
-	mux.HandleFunc("GET /api/v1/public/dates", s.publicObservatoryDates)
+	mux.Handle("GET /api/v1/public/dates", s.authorizeWebAPI(http.HandlerFunc(s.publicObservatoryDates)))
 	mux.Handle("/mcp", s.mcpHandler())
 	return s.cors(mux)
+}
+
+func (s *Server) authorizeWebAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.webAPIToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(s.webAPIToken)) != 1 {
+			writeError(w, http.StatusUnauthorized, "autenticación requerida")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) cors(next http.Handler) http.Handler {
