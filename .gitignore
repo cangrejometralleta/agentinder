@@ -11,3 +11,4 @@ backend/api
 .vscode/
 .firebase/
 firebase-debug.log*
+*.handoff.*
